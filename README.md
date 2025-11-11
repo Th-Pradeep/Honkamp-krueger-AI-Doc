@@ -100,6 +100,7 @@ The default pipeline processes PDFs from the azure storage account bronze contai
 - Leverage Log Analytics Workspace to run queries and see exceptions that occurred in the app
 - For deployment issues, use the Development Tools SSH console to inspect the internal file system and get deployment logs
 - Consider running `azd up --debug 2>&1 | tee debug.log` to output detailed deployment logs and save to a local file for inspection
+- **For Event Grid configuration issues** (Flex Consumption plan blob triggers), see [Event Grid Quick Start](docs/eventGrid-QuickStart.md)
 
 ### Common Issues
 1. "The deployment pipeline appears to complete without error, but no functions appear in my Azure portal.
@@ -107,6 +108,18 @@ The default pipeline processes PDFs from the azure storage account bronze contai
 - If there is an issue in the Configuration.py, it is possible that the function is not authenticating successfully with App Config.
   - Check that appropriate IAM roles are assigned
   - Check the DefaultAzureCredential settings and ensure that they make sense
+
+2. "Blob trigger not firing when files are uploaded to the bronze container" (Flex Consumption plan)
+- This is expected behavior if Event Grid is not configured
+- See [Event Grid Configuration Guide](docs/eventGridConfiguration.md) for setup instructions
+- Quick fix: Ensure you're using `@app.event_grid_trigger` instead of `@app.blob_trigger` for Flex Consumption plan
+
+## Documentation
+
+- [Event Grid Configuration Guide](docs/eventGridConfiguration.md) - Comprehensive guide for Event Grid setup with Flex Consumption plan
+- [Event Grid Quick Start](docs/eventGrid-QuickStart.md) - Quick reference for Event Grid configuration
+- [Prompt Configuration](docs/promptConfiguration.md) - Guide for configuring prompts
+- [Troubleshooting Guide](docs/troubleShootingGuide.md) - Additional troubleshooting steps
 
 ##  MIT License
 https://opensource.org/license/MIT 

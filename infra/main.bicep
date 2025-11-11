@@ -59,6 +59,49 @@ param location string
 ])
 param aoaiLocation string
 
+// RJ_Flex_consumption_CR9: Start: 11/05/2025 : Added for configurable hosting plan parameters (hostingPlanSkuTier, hostingPlanSkuName, hostingPlanKind, hostingPlanZoneRedundant, maximumInstanceCount, instanceMemoryMB)
+@description('Hosting plan SKU tier. Options: FlexConsumption (serverless), Dynamic (Consumption), ElasticPremium (Premium), Standard (Dedicated).')
+@allowed([
+  'FlexConsumption'
+  'Dynamic'
+  'ElasticPremium'
+  'Standard'
+])
+param hostingPlanSkuTier string = 'FlexConsumption'
+
+@description('Hosting plan SKU name. For FlexConsumption use FC1, for Dynamic use Y1, for ElasticPremium use EP1/EP2/EP3, for Standard use S1/S2/S3.')
+@allowed([
+  'FC1'
+  'Y1'
+  'EP1'
+  'EP2'
+  'EP3'
+  'S1'
+  'S2'
+  'S3'
+  'P0v3'
+  'P1v3'
+  'P2v3'
+  'P3v3'
+])
+param hostingPlanSkuName string = 'FC1'
+
+@description('Hosting plan kind. For Flex Consumption use "functionapp", for other plans typically use "functionapp" or "linux".')
+param hostingPlanKind string = 'functionapp'
+
+@description('Zone redundancy for hosting plan. Only applicable for Flex Consumption plan.')
+param hostingPlanZoneRedundant bool = false
+
+@description('Maximum instance count for Flex Consumption plan. Default: 100. Only applicable when using FlexConsumption tier.')
+@minValue(1)
+@maxValue(200)
+param maximumInstanceCount int = 100
+
+@description('Instance memory in MB for Flex Consumption plan. Allowed: 2048, 4096. Default: 2048. Only applicable when using FlexConsumption tier.')
+@allowed([2048, 4096])
+param instanceMemoryMB int = 2048
+// RJ_Flex_consumption_CR9: End: 11/05/2025 : Added for configurable hosting plan parameters (hostingPlanSkuTier, hostingPlanSkuName, hostingPlanKind, hostingPlanZoneRedundant, maximumInstanceCount, instanceMemoryMB)
+
 @description('Network isolation? If yes it will create the private endpoints.')
 @allowed([true, false])
 param networkIsolation bool
@@ -397,7 +440,8 @@ var keyVaultSecretsUserIdentityAssignmentsAll = concat(keyVaultSecretsUserIdenti
   }
 ])
 
-var subnets = reduce(
+// subnets only available when vnet is created (networkIsolation is true)
+var subnets = (_networkIsolation && !_vnetReuse) ? reduce(
   map(vnet.outputs.subnets, subnet => {
       '${subnet.name}': {
         id: subnet.id
@@ -406,7 +450,7 @@ var subnets = reduce(
     }),
   {},
   (cur, acc) => union(cur, acc)
-)
+) : {}
 
 // 1. Key Vault
 module keyVault './modules/security/key-vault.bicep' = {
@@ -817,6 +861,14 @@ module procFuncStorage './modules/storage/storage-account.bicep' = {
       enabled: true
       days: 7
     }
+    // RJ_Flex_consumption_CR12: Start: 11/05/2025 : Added for deployment container creation in function storage account for Flex Consumption plan
+    // Create deployment container for Flex Consumption plan (required for deployment.storage)
+    containers: (hostingPlanSkuTier == 'FlexConsumption') ? [
+      {
+        name: 'deployment'
+      }
+    ] : []
+    // RJ_Flex_consumption_CR12: End: 11/05/2025 : Added for deployment container creation in function storage account for Flex Consumption plan
     networkAcls : {
       resourceAccessRules :[]
       bypass: 'AzureServices'
@@ -832,16 +884,24 @@ module procFuncStorage './modules/storage/storage-account.bicep' = {
   }  
 }
 
+// RJ_Flex_consumption_CR10: 11/05/2025 : Added for isFlexConsumptionPlan variable to dynamically determine plan type based on SKU tier
+var isFlexConsumptionPlan = hostingPlanSkuTier == 'FlexConsumption'
+
+// RJ_Flex_consumption_CR11: Start: 11/05/2025 : Added for configurable hosting plan module call using parameters instead of hardcoded values
 module hostingPlan './modules/compute/hosting-plan.bicep' = {
   scope : resourceGroup
   name: 'hostingPlan'
   params: {
     name: hostingPlanName
     location: location
-    sku: 'S3'
+    kind: hostingPlanKind
+    skuTier: hostingPlanSkuTier
+    skuName: hostingPlanSkuName
+    zoneRedundant: hostingPlanZoneRedundant
     tags: tags
   }
 }
+// RJ_Flex_consumption_CR11: End: 11/05/2025 : Added for configurable hosting plan module call using parameters instead of hardcoded values
 
 module websitesDnsZone './modules/network/private-dns-zones.bicep' = if (_networkIsolation && !_vnetReuse) {
   scope : resourceGroup
@@ -897,9 +957,47 @@ module processingFunctionApp './modules/compute/functionApp.bicep' = {
     tags: union(tags , { 'azd-service-name' : 'processing' })
     networkIsolation: _networkIsolation
     virtualNetworkSubnetId : _networkIsolation?vnet.outputs.appServicesSubId:''
+    // RJ_Flex_consumption_CR13: Start: 11/05/2025 : Added for dynamic Flex Consumption configuration in function app module call using plan type parameters
+    // Hosting plan configuration - dynamically set based on plan type
+    isFlexConsumption: isFlexConsumptionPlan
+    maximumInstanceCount: maximumInstanceCount
+    instanceMemoryMB: instanceMemoryMB
+    // RJ_Flex_consumption_CR13: End: 11/05/2025 : Added for dynamic Flex Consumption configuration in function app module call using plan type parameters
     appSettings: [
       
     ]
+  }
+}
+
+// Event Grid System Topic for Storage Account Blob Events
+// Required for Flex Consumption Plan blob triggers to work properly
+module storageEventGridTopic './modules/storage/eventgrid-system-topic.bicep' = {
+  scope: resourceGroup
+  name: 'storage-eventgrid-topic'
+  params: {
+    name: '${storageAccountName}-topic'
+    location: location
+    tags: tags
+    storageAccountId: storage.outputs.id
+    topicType: 'Microsoft.Storage.StorageAccounts'
+  }
+}
+
+// Event Grid Subscription to connect blob events to Function App
+// This enables the Event Grid trigger in function_app.py to receive blob events
+module storageEventGridSubscription './modules/storage/eventgrid-subscription.bicep' = {
+  scope: resourceGroup
+  name: 'storage-eventgrid-subscription'
+  params: {
+    name: 'bronze-blob-events'
+    systemTopicName: storageEventGridTopic.outputs.name
+    functionAppId: processingFunctionApp.outputs.id
+    functionName: 'start_orchestrator_on_blob'
+    containerFilters: ['bronze'] // Only trigger for bronze container
+    includedEventTypes: [
+      'Microsoft.Storage.BlobCreated'
+    ]
+    eventDeliverySchema: 'EventGridSchema'
   }
 }
 
@@ -1177,7 +1275,8 @@ module aiMultiServices './modules/ai_ml/aimultiservices.bicep' = {
   }
 }
 
-module testvm './modules/vm/dsvm.bicep' = if ((_networkIsolation && !_vnetReuse) || _deployVM)  {
+// VM can only be deployed when network isolation is enabled (needs VNet and subnets)
+module testvm './modules/vm/dsvm.bicep' = if (_networkIsolation && !_vnetReuse && _deployVM)  {
   scope : resourceGroup
   name: 'testvm'
   params: {

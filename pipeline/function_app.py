@@ -19,32 +19,55 @@ app = df.DFApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 
 import logging
 
-# Blob-triggered starter
+# Event Grid-triggered starter for blob events
+# For Flex Consumption plan, this uses Event Grid trigger instead of blob trigger
+# The Event Grid subscription is configured in infra/main.bicep
 @app.function_name(name="start_orchestrator_on_blob")
-@app.blob_trigger(
-    arg_name="blob",
-    path="bronze/{name}",
-    connection="DataStorage",
-)
+@app.event_grid_trigger(arg_name="event")  # ← CHANGE 1
 @app.durable_client_input(client_name="client")
 async def start_orchestrator_blob(
-    blob: func.InputStream,
+    event: func.EventGridEvent,     # ← CHANGE 2
     client: df.DurableOrchestrationClient,
 ):
-    logging.info(f"Blob Received: {blob}") 
-    logging.info(f"path: {blob.name}")
-    logging.info(f"Size: {blob.length} bytes")
-    logging.info(f"URI: {blob.uri}")   
-
+    # ← CHANGE 3: Parse blob information from Event Grid event
+    event_data = event.get_json()
+    blob_url = event_data.get('url')
+    blob_subject = event.subject  # e.g., /blobServices/default/containers/bronze/blobs/file.pdf
+    
+    logging.info(f"Event Grid Event Received")
+    logging.info(f"Event Type: {event.event_type}")
+    logging.info(f"Subject: {blob_subject}")
+    logging.info(f"Blob URL: {blob_url}")
+    
+    # ← CHANGE 4: Extract blob name from subject (format: /blobServices/default/containers/{container}/blobs/{name})
+    subject_parts = blob_subject.split('/blobs/')
+    blob_name = subject_parts[1] if len(subject_parts) > 1 else blob_subject
+    # Result: "file.pdf"
+    
+    # ← CHANGE 5: Extract container name from subject
+    container_parts = blob_subject.split('/containers/')
+    if len(container_parts) > 1:
+        container_name = container_parts[1].split('/')[0]
+    else:
+        container_name = "bronze"  # default
+    # Result: "bronze"
+    
+    # ← CHANGE 6: Build blob metadata including the container prefix for full path
+    full_blob_name = f"{container_name}/{blob_name}"
+    # Result: "bronze/file.pdf"
+    
+    # ← CHANGE 7: Create BlobMetadata (same format as before)
     blob_metadata = BlobMetadata(
-        name=blob.name,          # e.g. 'bronze/file.txt'
-        url=blob.uri,            # full blob URL
-        container="bronze",
+        name=full_blob_name,     # e.g. 'bronze/file.pdf'
+        url=blob_url,            # full blob URL
+        container=container_name,
     )
     logging.info(f"Blob Metadata: {blob_metadata}")
     logging.info(f"Blob Metadata JSON: {blob_metadata.to_dict()}")
+
+    # Start orchestration (same as before)
     instance_id = await client.start_new("orchestrator", client_input=[blob_metadata.to_dict()])
-    logging.info(f"Started orchestration {instance_id} for blob {blob.name}")
+    logging.info(f"Started orchestration {instance_id} for blob {blob_name}")
 
 
 # An HTTP-triggered function with a Durable Functions client binding

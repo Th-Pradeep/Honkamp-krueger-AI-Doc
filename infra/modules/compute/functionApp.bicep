@@ -33,9 +33,25 @@ param hostingPlanName string
 param applicationInsightsName string
 param virtualNetworkSubnetId string
 param funcStorageName string
+@description('Maximum instance count for Flex Consumption plan. Default: 100')
+param maximumInstanceCount int = 100
+@description('Instance memory in MB for Flex Consumption plan. Allowed: 2048, 4096. Default: 2048')
+@allowed([2048, 4096])
+param instanceMemoryMB int = 2048
+@description('Whether the hosting plan is Flex Consumption. Affects function app configuration.')
+param isFlexConsumption bool = true
 var functionAppName = appName
 var functionWorkerRuntime = runtime
 
+// Map runtime to functionAppConfig runtime name
+// Flex Consumption supports: python, node, dotnet-isolated, java, powerShell
+var runtimeName = runtime == 'python' ? 'python' : (runtime == 'node' ? 'node' : (runtime == 'dotnet' ? 'dotnet-isolated' : runtime))
+
+// RJ_Flex_consumption_CR1: Start: 11/05/2025 : Added for Flex Consumption deployment storage blob endpoint
+// Construct blob endpoint URL for deployment storage (required for Flex Consumption validation)
+// Note: For zipDeploy, deployment.storage is not actually used, but Azure requires it to be valid if present
+var deploymentStorageBlobEndpoint = 'https://${funcStorageName}.blob.${environment().suffixes.storage}/deployment'
+// RJ_Flex_consumption_CR1: End: 11/05/2025 : Added for Flex Consumption deployment storage blob endpoint
 
 var openaiApiVersion = '2024-05-01-preview'
 var openaiApiBase = aoaiEndpoint
@@ -66,7 +82,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
     virtualNetworkSubnetId: networkIsolation ? virtualNetworkSubnetId : null
     siteConfig: {
       cors: {allowedOrigins: ['https://ms.portal.azure.com', 'https://portal.azure.com'] }
-      alwaysOn: true
+      // RJ_Flex_consumption_CR6: 11/05/2025 : Added for conditional alwaysOn setting - not supported for Flex Consumption plans
+      alwaysOn: isFlexConsumption ? null : true
       publicNetworkAccess: networkIsolation ? null : 'Enabled'
       ipSecurityRestrictionsDefaultAction : networkIsolation ? 'Deny' : 'Allow'
       ipSecurityRestrictions: networkIsolation ? [
@@ -129,11 +146,17 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'ApplicationInsights__InstrumentationKey'
           value: applicationInsights.properties.InstrumentationKey
         }
+        // RJ_Flex_consumption_CR2: Start: 11/05/2025 : Added for conditional FUNCTIONS_WORKER_RUNTIME setting
+        // FUNCTIONS_WORKER_RUNTIME is not allowed for Flex Consumption plans
+        // Runtime is configured via functionAppConfig.runtime instead
+      ], isFlexConsumption ? [] : [
         {
           name: 'FUNCTIONS_WORKER_RUNTIME'
           value: functionWorkerRuntime
         }
-        
+      ], isFlexConsumption ? [] : [
+        // RJ_Flex_consumption_CR2: End: 11/05/2025 : Added for conditional FUNCTIONS_WORKER_RUNTIME setting
+        // RJ_Flex_consumption_CR3: Start: 11/05/2025 : Added for conditional ENABLE_ORYX_BUILD and SCM_DO_BUILD_DURING_DEPLOYMENT settings
         {
           name: 'ENABLE_ORYX_BUILD'
           value: 'true'
@@ -142,6 +165,8 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
           name: 'SCM_DO_BUILD_DURING_DEPLOYMENT'
           value: 'true'
         }
+        // RJ_Flex_consumption_CR3: End: 11/05/2025 : Added for conditional ENABLE_ORYX_BUILD and SCM_DO_BUILD_DURING_DEPLOYMENT settings
+      ], [
         {
           name: 'APP_CONFIGURATION_URI'
           value: concat('https://', appConfigName, '.azconfig.io')
@@ -171,9 +196,36 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
         }
       ] : [])
       ftpsState: 'FtpsOnly'
-      linuxFxVersion: linuxFxVersion
+      // RJ_Flex_consumption_CR4: 11/05/2025 : Added for conditional linuxFxVersion setting - not allowed for Flex Consumption plans, must be set via functionAppConfig.runtime instead
+      linuxFxVersion: isFlexConsumption ? null : linuxFxVersion
       minTlsVersion: '1.2'
-    }  
+    }
+    // RJ_Flex_consumption_CR5: Start: 11/05/2025 : Added for Flex Consumption functionAppConfig with runtime, scaling, and deployment configuration
+    // Flex Consumption plan requires functionAppConfig
+    // Note: deployment.storage is optional for zipDeploy, but Azure requires it to be valid if present
+    // We provide a minimal valid configuration to satisfy validation
+    functionAppConfig: isFlexConsumption ? {
+      runtime: {
+        name: runtimeName
+        version: runtime == 'python' ? '3.11' : (runtime == 'node' ? '20' : '~4')
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: maximumInstanceCount
+        instanceMemoryMB: instanceMemoryMB
+      }
+      // deployment.storage is required for validation even with zipDeploy
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: deploymentStorageBlobEndpoint
+          authentication: {
+            type: 'UserAssignedIdentity'
+            userAssignedIdentityResourceId: identityId
+          }
+        }
+      }
+    } : null
+    // RJ_Flex_consumption_CR5: End: 11/05/2025 : Added for Flex Consumption functionAppConfig with runtime, scaling, and deployment configuration
     httpsOnly: true
   }
 }
